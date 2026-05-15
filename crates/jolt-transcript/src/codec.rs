@@ -1,87 +1,10 @@
 //! Local codecs for absorbing / decoding Jolt-native messages over a
 //! byte-oriented spongefish sponge.
 //!
-//! Spongefish ships optional arkworks codec features; we don't enable them
-//! because Jolt patches `ark-ff` / `ark-serialize` to a fork. These local
-//! codecs are injective and prefix-free.
+//! Field element codecs come from Spongefish's `ark-ff` feature. This module
+//! keeps only Jolt's variable-length byte-message framing.
 
-use jolt_field::{CanonicalBytes, FixedByteSize, FromPrimitiveInt, ReducingBytes};
-use spongefish::{Decoding, Encoding, NargDeserialize, VerificationError, VerificationResult};
-
-const FR_TRUNCATED_BYTES: usize = 16;
-/// Bytes drawn per full-field challenge. 64 bytes mod a ≤254-bit field
-/// modulus is within `2^{-130}` statistical distance of uniform. Tuned for
-/// BN254; safe for any field up to that width.
-const FR_UNIFORM_BYTES: usize = 64;
-
-/// Wraps a field element for absorption / decoding as little-endian bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FieldEl<F>(pub F);
-
-impl<F> From<F> for FieldEl<F> {
-    fn from(f: F) -> Self {
-        Self(f)
-    }
-}
-
-impl<F: CanonicalBytes> Encoding<[u8]> for FieldEl<F> {
-    fn encode(&self) -> impl AsRef<[u8]> {
-        self.0.to_bytes_le_vec()
-    }
-}
-
-/// 64-byte squeeze buffer used as the [`Decoding::Repr`] for full-field
-/// challenges. See `FR_UNIFORM_BYTES`.
-#[derive(Clone, Copy)]
-pub struct UniformFrBytes(pub [u8; FR_UNIFORM_BYTES]);
-
-impl Default for UniformFrBytes {
-    fn default() -> Self {
-        Self([0u8; FR_UNIFORM_BYTES])
-    }
-}
-
-impl AsMut<[u8]> for UniformFrBytes {
-    fn as_mut(&mut self) -> &mut [u8] {
-        &mut self.0
-    }
-}
-
-impl<F: ReducingBytes> Decoding<[u8]> for FieldEl<F> {
-    type Repr = UniformFrBytes;
-    fn decode(buf: Self::Repr) -> Self {
-        FieldEl(F::from_le_bytes_mod_order(&buf.0))
-    }
-}
-
-impl<F: FixedByteSize + ReducingBytes> NargDeserialize for FieldEl<F> {
-    fn deserialize_from_narg(buf: &mut &[u8]) -> VerificationResult<Self> {
-        let n = F::NUM_BYTES;
-        if buf.len() < n {
-            return Err(VerificationError);
-        }
-        let (head, tail) = buf.split_at(n);
-        *buf = tail;
-        Ok(FieldEl(F::from_le_bytes_mod_order(head)))
-    }
-}
-
-/// 128-bit-truncating challenge wrapper. Decodes 16 squeezed bytes via
-/// `F::from_u128`. Verifier-message-only — deliberately implements
-/// neither `Encoding` nor `NargSerialize` so that
-/// `prover_message(&FieldElOptimized(_))` is a compile error rather than
-/// a silent orphan in the NARG. (Spongefish's blanket
-/// `impl<T: Encoding<[u8]>> NargSerialize for T` would otherwise let any
-/// `Encoding` slip into `prover_message` undetected.)
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FieldElOptimized<F>(pub F);
-
-impl<F: FromPrimitiveInt> Decoding<[u8]> for FieldElOptimized<F> {
-    type Repr = [u8; FR_TRUNCATED_BYTES];
-    fn decode(buf: Self::Repr) -> Self {
-        FieldElOptimized(F::from_u128(u128::from_le_bytes(buf)))
-    }
-}
+use spongefish::{Encoding, NargDeserialize, VerificationError, VerificationResult};
 
 /// Length-prefixed byte string. 8-byte LE length keeps `BytesMsg(a) ; BytesMsg(b)`
 /// distinguishable from `BytesMsg(a||b)`.
@@ -131,16 +54,6 @@ impl NargDeserialize for BytesMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jolt_field::Fr;
-
-    #[test]
-    fn fr_le_bytes_round_trip() {
-        for i in 0u64..32 {
-            let f = Fr::from(i.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-            let bytes = f.to_bytes_le_vec();
-            assert_eq!(Fr::from_le_bytes_mod_order(&bytes), f);
-        }
-    }
 
     #[test]
     fn bytes_msg_is_length_prefixed() {
@@ -174,12 +87,5 @@ mod tests {
         let result = BytesMsg::deserialize_from_narg(&mut cursor);
         assert!(result.is_err());
         assert_eq!(cursor.len(), before, "cursor must not advance on error");
-    }
-
-    #[test]
-    fn field_el_optimized_decodes_u128() {
-        let buf = 12345u128.to_le_bytes();
-        let FieldElOptimized(f) = FieldElOptimized::<Fr>::decode(buf);
-        assert_eq!(f, Fr::from(12345u128));
     }
 }
